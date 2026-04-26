@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { SpotifyHandlerExtra, tool } from './types.js';
-import { handleSpotifyRequest } from './utils.js';
+import { handleSpotifyRequest, loadSpotifyConfig } from './utils.js';
 
 const playMusic: tool<{
   uri: z.ZodOptional<z.ZodString>;
@@ -234,23 +234,57 @@ const addTracksToPlaylist: tool<{
     }
 
     try {
-      const trackUris = trackIds.map((id) => `spotify:track:${id}`);
+      const config = loadSpotifyConfig();
+      const token = config.accessToken;
 
-      await handleSpotifyRequest(async (spotifyApi) => {
-        await spotifyApi.playlists.addItemsToPlaylist(
-          playlistId,
-          trackUris,
-          position,
+      // Fetch existing track IDs to deduplicate
+      const existingIds = new Set<string>();
+      let offset = 0;
+      while (true) {
+        const checkResp = await fetch(
+          `https://api.spotify.com/v1/playlists/${playlistId}/items?limit=50&offset=${offset}`,
+          { headers: { Authorization: `Bearer ${token}` } },
         );
+        if (!checkResp.ok) break; // If we can't read, skip dedup and try to add anyway
+        const data = await checkResp.json();
+        for (const item of (data.items ?? [])) {
+          const tr = item?.track ?? item?.item;
+          if (tr?.id) existingIds.add(tr.id);
+        }
+        if (!data.next) break;
+        offset += 50;
+      }
+
+      const newTrackIds = trackIds.filter((id) => !existingIds.has(id));
+      if (newTrackIds.length === 0) {
+        return { content: [{ type: 'text', text: 'All tracks already exist in this playlist — nothing added.' }] };
+      }
+
+      const trackUris = newTrackIds.map((id) => `spotify:track:${id}`);
+      const body: Record<string, unknown> = { uris: trackUris };
+      if (position !== undefined) body.position = position;
+
+      const resp = await fetch(`https://api.spotify.com/v1/playlists/${playlistId}/items`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
       });
+
+      if (!resp.ok) {
+        const errBody = await resp.text();
+        throw new Error(`Spotify API error ${resp.status}: ${errBody}`);
+      }
 
       return {
         content: [
           {
             type: 'text',
-            text: `Successfully added ${trackIds.length} track${
-              trackIds.length === 1 ? '' : 's'
-            } to playlist (ID: ${playlistId})`,
+            text: `Successfully added ${newTrackIds.length} track${
+              newTrackIds.length === 1 ? '' : 's'
+            } to playlist (ID: ${playlistId})${existingIds.size > 0 ? ` (skipped ${trackIds.length - newTrackIds.length} duplicate${trackIds.length - newTrackIds.length === 1 ? '' : 's'})` : ''}`,
           },
         ],
       };

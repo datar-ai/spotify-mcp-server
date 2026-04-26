@@ -277,15 +277,16 @@ const getPlaylistTracks: tool<{
   handler: async (args, _extra: SpotifyHandlerExtra) => {
     const { playlistId, limit = 50, offset = 0 } = args;
 
-    const playlistTracks = await handleSpotifyRequest(async (spotifyApi) => {
-      return await spotifyApi.playlists.getPlaylistItems(
-        playlistId,
-        undefined,
-        undefined,
-        limit as MaxInt<50>,
-        offset,
-      );
+    const config = loadSpotifyConfig();
+    const url = `https://api.spotify.com/v1/playlists/${playlistId}/items?limit=${limit}&offset=${offset}`;
+    const resp = await fetch(url, {
+      headers: { Authorization: `Bearer ${config.accessToken}` },
     });
+    if (!resp.ok) {
+      const body = await resp.text();
+      throw new Error(`Spotify API error ${resp.status}: ${body}`);
+    }
+    const playlistTracks = await resp.json();
 
     if ((playlistTracks.items?.length ?? 0) === 0) {
       return {
@@ -298,13 +299,13 @@ const getPlaylistTracks: tool<{
       };
     }
 
-    const formattedTracks = playlistTracks.items
-      .map((item, i) => {
-        const { track } = item;
+    const formattedTracks = (playlistTracks.items as any[])
+      .map((item: any, i: number) => {
+        const track = item.track ?? item.item;
         if (!track) return `${offset + i + 1}. [Removed track]`;
 
         if (isTrack(track)) {
-          const artists = track.artists.map((a) => a.name).join(', ');
+          const artists = track.artists.map((a: any) => a.name).join(', ');
           const duration = formatDuration(track.duration_ms);
           return `${offset + i + 1}. "${track.name}" by ${artists} (${duration}) - ID: ${track.id}`;
         }
